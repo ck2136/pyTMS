@@ -1,0 +1,11 @@
+Metadata-Version: 1.0
+Name: pyTMS
+Version: 1.0
+Summary: The Truven Market Scan Python Analysis Package
+Home-page: UNKNOWN
+Author: Chong H. Kim
+Author-email: chong@stratevi.com
+License: MIT
+Description: UNKNOWN
+Keywords: Truven Market Scan,Database analysis
+Platform: Linux

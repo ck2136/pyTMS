@@ -4,7 +4,7 @@
 # Purpose       : class Study
 # Date created  : Wed 16 Oct 2019 09:50:10 AM MDT
 # Created by    : ck
-# Last modified : Sat 19 Oct 2019 03:39:38 PM MDT
+# Last modified : Sun 20 Oct 2019 04:50:34 PM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
@@ -59,6 +59,7 @@ class Study(object):
         self.ep_ip_claims = pd.DataFrame()
         self.ep_op_claims = pd.DataFrame()
         self.CE_df = pd.DataFrame()
+        self.demo_df = pd.DataFrame()
 
         # DX and CPT codes to extract
         self.ICD9 = ["347","34700","3470","34701","3471","34711","34710"] # for narcolepsy
@@ -74,7 +75,7 @@ class Study(object):
         self.dtype = {
                 "ENROLID": np.int64, "DX1": np.character,"DX2": np.character, "DX3": np.character, "DX4": np.character, 
                 "PROC1": np.character, "HLTHPLAN": np.character, "NTWKPROV": np.character, "PROCTYP": np.character, 
-                "PAIDNTWK": np.character, "PDX": np.character, "INDUSTRY": np.character, "CASE": np.int8, "PROVID": np.float64,
+                "PAIDNTWK": np.character, "PDX": np.character, "INDUSTRY": np.character, "CASE": np.float16, "PROVID": np.float64,
                 "QTY": np.int64, "COB": np.float64, "CAP_SVC": np.character, "PROCMOD":np.character, "PROCGRP":np.float64,
                 "PPROC":np.character
                 }
@@ -89,7 +90,19 @@ class Study(object):
         self.filter_columns_op = ["ENROLID", "SVCDATE","DX1","DX2","DX3","DX4","PROC1"]
         self.filter_columns_ip_full = ["ENROLID", "SVCDATE","PDX","DX1","DX2","DX3","DX4","PROC1","YEAR","CASEID","PROCTYP","PROCMOD","PAY","STDPLAC","STDPROV","SVCSCAT"]
         self.filter_columns_op_full = ["ENROLID", "SVCDATE","DX1","DX2","DX3","DX4","PROC1","YEAR","PROCTYP","PROCMOD","PAY","STDPLAC","STDPROV","SVCSCAT"]
+        self.filter_columns_demo = ["ENROLID","YEAR","AGE","DOBYR","AGEGRP","SEX","REGION","EFAMID","EMPREL"]
         self.enrl_cols = ["ENROLID","DTSTART","DTEND","MEMDAYS"]
+        self.sex_labels = {
+                    "1": "1-Male",
+                    "2": "2-Female"
+                }
+        self.region_labels = {
+                    "1": "1-Northeast",
+                    "2": "2-North Central",
+                    "3": "3-South",
+                    "4": "4-West",
+                    "5": "5-Unknown"
+                }
 
     # }}}
 
@@ -388,11 +401,18 @@ class Study(object):
     ## }}}
 
     ## STEP 3 : Identify Controls {{{
-    def identify_controls(self):
+    def identify_controls(
+            self,
+            N = 100000 # only when we don't have ICD9_CTRL and ICD10_CTRL
+            ):
 
         """
         identify_controls:
             Function/Method to extract Control Population.
+
+        Arguments:
+            
+            N :     Number of patients to be extracted if no ICD9_CTRL and ICD10_CTRL are given
             
         If ICD9_CTRL or ICD10_CTRL or CPT_CTRL are defined, then the ccaeo/mdcro and ccaes/mdcrs files will be extracted.
         If ICD9_CTRL and ICD10_CTRL and CPT_CTRL are note defined, then the ccaet and mdcrt files will be extracted.
@@ -420,23 +440,30 @@ class Study(object):
 
             if self.case_ID.empty:
                 return(
-                        print("case_ID attribute emtpy. Need to populate with pd.DataFrame object with ENROLID")
+                        print("case_ID attribute emtpy. Need to populate with pd.DataFrame object with ENROLID in order to not select the cases.")
                         )
             else:
                 return(
-                        self.extract_enroll_claims(process=self.process_enroll_chunk)
+                        self.extract_enroll_claims(
+                            process=self.process_ctrlgrp_enroll_chunk,
+                            store=True,
+                            idonly=False,
+                            group="control",
+                            N = N
+                            )
                         )
 
     ## }}}
 
-    ## STEP 3 : Extract population id or claims for groups {{{
+    ## STEP 3 : Extract ids from enrollment claims {{{
     def extract_enroll_claims(
             self,
             process,
             cols = ["ENROLID"],
             store = True,
             idonly = True,
-            group = "control"
+            group = "control",
+            N = 100000
             ):
 
         # reset the regexpattern to take Annual Enrollment Details Table (t at the end)
@@ -481,26 +508,55 @@ class Study(object):
             df_fin["DTEND"] = pd.to_datetime(df_fin["DTEND"])
             df_fin["DTSTART"] = pd.to_datetime(df_fin["DTSTART"])
 
-        # Store control group ID's
-        if idonly:
+        if group == "control":
+            # Store control group ID's
+            if idonly:
 
-            df_fin = df_fin.drop_duplicates()
+                df_fin = df_fin.drop_duplicates()
 
-            if store:
-                self.control_ID = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]]
+                if store:
+                    self.control_ID = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]].head(N)
+                else:
+                    return(
+                            df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]].head(N)
+                            )
             else:
-                return(
-                        df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]]
-                        )
+
+                self.control_ID  = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]].head(N)
+                if store:
+                    self.control_claims = self.control_ID.merge(df_fin, on="ENROLID",how="inner")
+                else:
+                    return(
+                            self.control_ID.merge(df_fin, on="ENROLID",how="inner")
+                            )
+        # For case group
         else:
-            return(
-                    df_fin
-                    )
+            if idonly:
+
+                df_fin = df_fin.drop_duplicates()
+
+                if store:
+                    self.case_ID = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]]
+                else:
+                    return(
+                            df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]]
+                            )
+            else:
+
+                self.case_ID = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]]
+
+                if store:
+                    self.case_claims = self.case_ID.merge(df_fin, on="ENROLID",how="inner")
+                else:
+                    return(
+                            self.case_ID.merge(df_fin, on="ENROLID",how="inner")
+                            )
+
 
 
     ## }}}
 
-    ## STEP 3: Filter/Processing General Population Enrollment Files {{{
+    ## STEP 3 : Filter/Processing General Population Enrollment Files {{{
     def process_ctrlgrp_enroll_chunk(
             self,
             i, 
@@ -638,15 +694,19 @@ class Study(object):
                 chunksize=chunksize,
                 dtype = self.dtype
                 ):
+
             chunk = chunk[cols]
+
+            # Label those with 
+            if re.search('(ccae.*){1}(\d){3}', data):
+                chunk["PAYER"] = "Commercial"
+            else:
+                chunk["PAYER"] = "Medicare"
 
         # - - - - - - - - - - - - - - - - - -
         # Section 3: Include GENPOP
         # - - - - - - - - - - - - - - - - - -
 
-            # - - - - - - - - - - - - - - - - - -
-            # 3.1: CASE = 0
-            # - - - - - - - - - - - - - - - - - -
             df_fin = df_fin.append(IDs.merge(chunk, on="ENROLID", how="inner"))
 
             print("Finished Chunk #", c ," and current number of rows : ", df_fin.shape[0]) 
@@ -990,61 +1050,7 @@ class Study(object):
                     )
     ## }}}
 
-    ### extract_evalpop_ce(): Extract evaluable population using continuous enrollment criteria {{{
-    def extract_evalpop_ce(self):
-
-        # REQUIREMENTS {{{
-        # Need 
-        #   1.ID's of Cases and Controls
-        #   2.IP/OP of Cases and Controls
-
-        if ((self.case_ID.empty == True) | (self.control_ID.empty == True) | (self.ep_ip_claims.empty == True) | (self.ep_op_claims.empty == True )) :
-
-            return (
-                    print("case_ID, control_ID, ep_ip_claims, and/or ep_op_claims is empty. Please fill them in accordingly")
-                    )
-        # }}}
-
-        # INDEX SVCDATE DATA CREATION {{{
-        else:
-            # identify index dx date (first dx for case; starting coverage date for ctrl) frame for CASE
-            # e.g. 
-            # id  | svcdate_10 | svcdate_9 | Index_date
-            ENROLID_DT = self.create_svc_date_df(
-                    self,
-                    group = "both"
-                    )
-        # }}}
-
-        # Continuous Enrollment Table Creation {{{
-            print("Creating Monthly Continuous Enrollment Data for Cases and Controls")
-            self.regexpattern = "(ccae|mdcr)(t)(\d){3}.csv.gz"
-
-            T_SUM = self.extract_enroll_claims(
-                process=self.process_enroll_chunk_all,
-                store=False,
-                cols = ["ENROLID","DTEND","DTSTART","MEMDAYS"],
-                idonly = False
-                )
-
-            T_SUM["DTEND"] = pd.to_datetime(T_SUM["DTEND"])
-            T_SUM["DTSTART"] = pd.to_datetime(T_SUM["DTSTART"])
-
-            return((ENROLID, T_SUM))
-
-            # T_min=T_SUM[["ENROLID","DTSTART"]].sort_values("DTSTART").groupby("ENROLID", as_index=False).first().set_index("ENROLID").rename(columns={"DTSTART":"DTSTART_MIN"})
-            # T_max=T_SUM[["ENROLID","DTEND"]].sort_values("DTEND").groupby("ENROLID", as_index=False).last().set_index("ENROLID").rename(columns={"DTEND":"DTSTART_MAX"})
-            # T_days=T_SUM[["ENROLID","MEMDAYS"]].groupby("ENROLID", as_index=False).sum().set_index("ENROLID").rename(columns={"MEMDAYS":"MEMDAYS_SUM"})
-            # T_count=T_SUM[["ENROLID","DTSTART"]].groupby("ENROLID", as_index=False).count().set_index("ENROLID").rename(columns={"DTSTART":"MONTHS_COUNT"})
-            # T_index=pd.concat([T_min, T_max, T_days, T_counts], axis=1)
-            # T_index["MEMDAYS_DIFF"]=T_index["DTEND_MAX"]-T_index["DTSTART_MIN"]+pd.Timedelta("1 day")
-            # T_index["COVERAGE_GAP"]=T_index.apply(lambda row: 1 if (row.MEMDAYS_DIFF>=pd.Timedelta(str(row.MEMDAYS_SUM + 45) + ' days' )) else 0, axis=1)
-
-        # }}}
-            
-    ### }}}
-
-    # Extract Evaluable Population by applying continuous enrollment Criteria {{{
+    # STEP 6 : Extract Evaluable Population by applying continuous enrollment Criteria {{{
 
     ## UTILITY FUNCTIONS {{{
     # UTILITY FUNCTION 1
@@ -1225,6 +1231,7 @@ class Study(object):
 
     ### }}}
 
+    ### Extract evaluation population based on years {{{
     def extract_eval_pop(
             self,
             years=1
@@ -1238,8 +1245,91 @@ class Study(object):
 
     # }}}
 
-
     ## }}}
+
+    # }}}
+
+    # STEP 7 : Extract Demographic Variables and CCI information {{{
+
+    def extract_demo(
+            self,
+            group = "case"
+            ):
+
+        # Change thte regular expression to look for the ccaea or mdcra files
+        self.regexpattern = "(ccae|mdcr){1}(a){1}(\d){3}.csv.gz"
+        filelist = self.ip_op_filelist(
+                printfiles=False
+                )
+        if len(filelist) == 0:
+            return(print("No files to append! Check the directory spelling!"))
+
+        df_fin = pd.DataFrame()
+
+        if group == "case":
+
+            arglist = list(
+                    zip(
+                        filelist,
+                        [self.chunksize  for x in range(len(filelist))],
+                        [self.filter_columns_demo for x in range(len(filelist))],
+                        [group for x in range(len(filelist))]
+                        )
+                    )
+
+        elif group == "control":
+
+            arglist = list(
+                    zip(
+                        filelist,
+                        [self.chunksize  for x in range(len(filelist))],
+                        [self.filter_columns_demo for x in range(len(filelist))],
+                        [group for x in range(len(filelist))]
+                        )
+                    )
+
+        elif group == "both":
+
+            arglist = list(
+                    zip(
+                        filelist,
+                        [self.chunksize  for x in range(len(filelist))],
+                        [self.filter_columns_demo for x in range(len(filelist))],
+                        [group for x in range(len(filelist))]
+                        )
+                    )
+
+        else:
+            return(
+                    print("Options for extracting claims: 'case' or 'control' or 'both'")
+                    )
+
+
+        # Init parallel processes
+        pool = mp.Pool(self.cores)
+        results_obj = [pool.apply_async(self.process_enroll_chunk_all, 
+            args = (
+                i, 
+                argtup[0],
+                argtup[1],
+                argtup[2],
+                argtup[3]
+                )
+            ) for i,argtup in enumerate(arglist)
+            ]
+        # Don't forget to close the processors
+        pool.close()
+        results_fin = [r.get()[1] for r in results_obj]
+        df_fin = df_fin.append(pd.concat(results_fin))
+
+        # return results 
+
+        print("FINISHED COMPILING ", group, " claims!")
+        print("Results are demographic claims data of ", group, " group ! It's stored in .demo_df")
+        self.demo_df = df_fin
+
+
+    # }}}
 
 # }}}
 

@@ -4,16 +4,17 @@
 # Purpose       :    
 # Date created  : Wed 16 Oct 2019 10:11:17 AM MDT
 # Created by    : ck
-# Last modified : Sat 19 Oct 2019 03:40:02 PM MDT
+# Last modified : Sun 20 Oct 2019 04:50:23 PM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
 # Load Packages {{{
 import numpy as np
 import pandas as pd
-from pyTMS import Study
+from pyTMS import Study, CCI
 from importlib import reload
 reload(Study)
+reload(CCI)
 # }}}
 
 ## Study 1 {{{
@@ -79,6 +80,8 @@ study1.identify_controls()
 res = study1.control_ID
 temp = res.groupby(["ENROLID"]).size().reset_index().rename(columns={0:"counts"})
 temp[temp["counts"] > 1].shape
+
+study1.control_claims
 ### NONE
 
 ### }}}
@@ -113,7 +116,7 @@ INDEX_DF.head()
 
 ## STEP 6: Extract All Enrolmment Data for group {{{
 ENROL_DF = study1.extract_enroll_claims(
-            study1.process_ctrlgrp_enroll_chunk_all,
+            study1.process_enroll_chunk_all,
             store = False,
             cols = study1.enrl_cols,
             idonly = False,
@@ -125,194 +128,90 @@ ENROL_DF
 
 ## STEP 7: Apply Continuous Enrollment Criteria For Each Group{{{
 
-# UTILITY FUNCTION 1
-def label_DTSTART(row):
-    if pd.isnull(row["DTSTART_y"]) == True:
-        return row["DTSTART_x"]
-    else:
-        return row["DTSTART_y"]
-
-### UTILITY FUNCTION 2- Condition 1: Individuals must have at least the same number of rows if not then they just don't have enough enrollment data so not continuous enrolled 
-def CE_condition1(x, months):
-    if len(x.columns) < months:
-        return 0
-    else:
-        return 1
-
-# MAIN FUNCTION
-def extract_id_ci(INDEX_DF, ENROL_DF, months=12):
-    ## Merge index dates with enrollment df
-    temp = INDEX_DF.reset_index()[["ENROLID","SVCDATE_INDEX"]].merge(ENROL_DF)
-
-    ## converge DTSTART and DTEND variables to datetime object
-    temp["DTSTART"] = pd.to_datetime(temp["DTSTART"]) 
-    temp["DTEND"] = pd.to_datetime(temp["DTEND"]) 
-
-    ### Identify DTEND's that are geq than Index Date for each ENROLID
-    INDEX_DF1 = temp.groupby("ENROLID").apply(lambda row: row[row.SVCDATE_INDEX<=row.DTEND]).set_index("ENROLID").sort_values("DTEND").groupby("ENROLID").first().reset_index()
-
-    ### Change the DTSTART to SVCDATE_INDEX
-    INDEX_DF1['DTSTART'] = INDEX_DF1['SVCDATE_INDEX']
-
-    ### Merge back the one row for each of the ENROLID
-    NEWENROL_DF = temp.merge(INDEX_DF1[["ENROLID","DTSTART","DTEND"]], on=["ENROLID","DTEND"], how="left")
-
-    ### CHANGE DTSTART to The SVCDATE_INDEX 
-    NEWENROL_DF["DTSTART"] = NEWENROL_DF.apply(lambda row: label_DTSTART(row), axis=1)
-
-    ### RECALCULATE MEMDAYS
-    NEWENROL_DF["MEMDAYS_new"] = NEWENROL_DF["DTEND"] - NEWENROL_DF["DTSTART"]
-    NEWENROL_DF["MEMDAYS_new"] = NEWENROL_DF.MEMDAYS_new.dt.days
-
-    ### Sort by DTEND ASCENDING (from beginning to end) and select 12 rows
-    ENROL = NEWENROL_DF.groupby("ENROLID").apply(lambda id: id.sort_values(["DTEND"])).reset_index(drop=True).groupby("ENROLID").head(months)
-
-    ENROL_WIDE = pd.DataFrame()
-
-    # IMPOSE CONDITION 1
-    ENROL_WIDE["CE1"] = ENROL.groupby("ENROLID").apply(lambda x: CE_condition1(x,12))
-
-    # IMPOSE CONDITION 2
-    ENROL_WIDE["CE2"] = np.abs(((ENROL.groupby("ENROLID").last().DTEND - ENROL.groupby("ENROLID").first().DTSTART) - pd.Timedelta(pd.Timedelta(str(365.24/12 * months) + " days"))).dt.days) <= 45
-
-    return(
-            ENROL_WIDE[((ENROL_WIDE["CE1"] == 1) & (ENROL_WIDE["CE2"] == True))]
+### MERGE INDEX_DF and ENROL_DF
+NEWENROL_DF = study1.Merge_IDX_ENR(
+            INDEX_DF, 
+            ENROL_DF
             )
 
+NEWENROL_DF
 
+### CREATE ENROLLMNT DF
+ENROL_FIN = pd.DataFrame()
+study1.Recursive_Extract_CI_IDs(
+            NEWENROL_DF,
+            ENROL_FIN, # a empty pd.DataFrame() needs to be an input as recursively it goes in and stuff gets added
+            repeat = 0, # how many times this function has been called
+            strict = True
+            )
 
-extract_id_ci(INDEX_DF, ENROL_DF, months=12)
-
-### MERGE THE INDEX CLAIMS with ENROLLMENT
-temp = INDEX_DF.reset_index()[["ENROLID","SVCDATE_INDEX"]].merge(ENROL_DF)
-
-### Identify first row that is lower than the SVCDATE_INDEX
-
-#### Change DTSTART AND DTEND to datetime objects
-temp["DTSTART"] = pd.to_datetime(temp["DTSTART"]) 
-temp["DTEND"] = pd.to_datetime(temp["DTEND"]) 
-
-### 1. Identify DTEND's that are geq than Index Date for each ENROLID
-INDEX_DF1 = temp.groupby("ENROLID").apply(lambda row: row[row.SVCDATE_INDEX<=row.DTEND]).set_index("ENROLID").sort_values("DTEND").groupby("ENROLID").first().reset_index()
-
-### Change the DTSTART to SVCDATE_INDEX
-INDEX_DF1['DTSTART'] = INDEX_DF1['SVCDATE_INDEX']
-
-### Merge back the one row for each of the ENROLID
-NEWENROL_DF = temp.merge(INDEX_DF1[["ENROLID","DTSTART","DTEND"]], on=["ENROLID","DTEND"], how="left")
-
-NEWENROL_DF[["ENROLID","DTSTART_x","DTSTART_y"]]
-
-### CHANGE DTSTART to The SVCDATE_INDEX 
-
-def label_DTSTART(row):
-    if pd.isnull(row["DTSTART_y"]) == True:
-        return row["DTSTART_x"]
-    else:
-        return row["DTSTART_y"]
-    
-NEWENROL_DF["DTSTART"] = NEWENROL_DF.apply(lambda row: label_DTSTART(row), axis=1)
-
-### RECALCULATE MEMDAYS
-NEWENROL_DF["MEMDAYS_new"] = NEWENROL_DF["DTEND"] - NEWENROL_DF["DTSTART"]
-NEWENROL_DF["MEMDAYS_new"] = NEWENROL_DF.MEMDAYS_new.dt.days
-
-### Sort by DTEND ASCENDING (from beginning to end) and select 12 rows
-ENROL12 = NEWENROL_DF.groupby("ENROLID").apply(lambda id: id.sort_values(["DTEND"])).reset_index(drop=True).groupby("ENROLID").head(12)
-ENROL24 = NEWENROL_DF.groupby("ENROLID").apply(lambda id: id.sort_values(["DTEND"])).reset_index(drop=True).groupby("ENROLID").head(24)
-ENROL36 = NEWENROL_DF.groupby("ENROLID").apply(lambda id: id.sort_values(["DTEND"])).reset_index(drop=True).groupby("ENROLID").head(36)
-ENROL48 = NEWENROL_DF.groupby("ENROLID").apply(lambda id: id.sort_values(["DTEND"])).reset_index(drop=True).groupby("ENROLID").head(48)
-ENROL60 = NEWENROL_DF.groupby("ENROLID").apply(lambda id: id.sort_values(["DTEND"])).reset_index(drop=True).groupby("ENROLID").head(60)
-
-### Check if continuous enrolled for 12 months 
-
-### Condition 1: Individuals must have at least the same number of rows if not then they just don't have enough enrollment data so not continuous enrolled 
-def CE_condition1(x, months):
-    if len(x.columns) < months:
-        return 0
-    else:
-        return 1
-
-ENROL_WIDE = pd.DataFrame()
-ENROL_WIDE["CE_MIN12"] = ENROL12.groupby("ENROLID").apply(lambda x: oneyr_ce1(x,12))
-ENROL_WIDE["CE_MIN24"] = ENROL24.groupby("ENROLID").apply(lambda x: oneyr_ce1(x,24))
-ENROL_WIDE["CE_MIN36"] = ENROL36.groupby("ENROLID").apply(lambda x: oneyr_ce1(x,36))
-ENROL_WIDE["CE_MIN48"] = ENROL48.groupby("ENROLID").apply(lambda x: oneyr_ce1(x,48))
-ENROL_WIDE["CE_MIN60"] = ENROL60.groupby("ENROLID").apply(lambda x: oneyr_ce1(x,60))
-
-ENROL_WIDE.head(5)
-
-## Condition 2: Identify id's where difference in 12 months last DT to first claim is greater than 365 days... If the difference is greater than 365 that means there is a gap
-## in coverage
-ENROL_WIDE["GAP_12"] = np.abs(((ENROL12.groupby("ENROLID").last().DTEND - ENROL12.groupby("ENROLID").first().DTSTART) - pd.Timedelta("365 days")).dt.days) <= 45
-ENROL_WIDE["GAP_24"] = np.abs(((ENROL24.groupby("ENROLID").last().DTEND - ENROL24.groupby("ENROLID").first().DTSTART) - pd.Timedelta("730 days")).dt.days) <= 45
-ENROL_WIDE["GAP_36"] = np.abs(((ENROL36.groupby("ENROLID").last().DTEND - ENROL36.groupby("ENROLID").first().DTSTART) - pd.Timedelta("1095 days")).dt.days) <= 45
-ENROL_WIDE["GAP_48"] = np.abs(((ENROL48.groupby("ENROLID").last().DTEND - ENROL48.groupby("ENROLID").first().DTSTART) - pd.Timedelta("1460 days")).dt.days) <= 45
-ENROL_WIDE["GAP_60"] = np.abs(((ENROL60.groupby("ENROLID").last().DTEND - ENROL60.groupby("ENROLID").first().DTSTART) - pd.Timedelta("1825 days")).dt.days) <= 45
-
-CE_1YRID = ENROL_WIDE[((ENROL_WIDE["CE_MIN12"] == 1) & (ENROL_WIDE["GAP_12"] == True))]
-CE_2YRID = ENROL_WIDE[((ENROL_WIDE["CE_MIN24"] == 1) & (ENROL_WIDE["GAP_24"] == True))]
-CE_3YRID = ENROL_WIDE[((ENROL_WIDE["CE_MIN36"] == 1) & (ENROL_WIDE["GAP_36"] == True))]
-CE_4YRID = ENROL_WIDE[((ENROL_WIDE["CE_MIN48"] == 1) & (ENROL_WIDE["GAP_48"] == True))]
-CE_5YRID = ENROL_WIDE[((ENROL_WIDE["CE_MIN60"] == 1) & (ENROL_WIDE["GAP_60"] == True))]
-
-CE_1YRID
-
-### Condition 2: The gap between DTSTART_MIN and DTSTART_MAX should not exceed 45 days
-def oneyr_ce2(x):
-
-    if x.last().DTEND  - x.first().DTSTART 
-    if len(x.columns) < 12:
-        return 0
-    else:
-        return 1
-
-### UTILITY FUNCTION 3- Condition 3: SUM MEMBER DAYS
-def CE_condition3(self,x,months):
-    if sum(x["MEMDAYS_new"]) + 45 <= 365.24/12 * months:
-        return True
-    else:
-        return False
-
-temp.head(13)
-
-NEWENROL_DF.groupby("ENROLID").apply
-
-
-NEWENROL_DF.DTSTART_y[0] == np.datetime64("NaT")
-
-NEWENROL_DF.loc[NEWENROL_DF["DTSTART_y"].empty != True , "DTSTART"] = NEWENROL_DF["DTSTART_y"]
-
-NEWENROL_DF.groupby("ENROLID").apply(lambda x: sum(x["MEMDAYS_new"]))
-
-
-INDEX_DF1.head()
-
-### 1. Identify DTEND's that are leq than Index Date for each ENROLID
-INDEX_DF1 = temp.groupby("ENROLID").apply(lambda row: row[row.SVCDATE_INDEX>=row.DTEND]).set_index("ENROLID").sort_values("DTEND").groupby("ENROLID").last()
-INDEX_DF1.shape
-
-temp.groupby("ENROLID").apply(lambda row: )
-
-### 2. Change the first row of DTEND to that of the SVCDATE_INDEX
-
-### 2. Select the first row of ID that indicates index date is lower than DTEND
-
-INDEX_DF1.head()
-
-### 
-
-temp[["ENROLID","SVCDATE_INDEX","DTEND"]]
-
-temp[temp["SVCDATE_INDEX"]>=temp["DTEND"]]
+### Check the continuous enrollment data frame
+study1.CE_df
 
 ## }}}
 
-## SSet Evaluable Population Using Continuous Enrollment {{{
+## STEP 8: Extract Demographic + CCI variables {{{
+
+### Extract Demographic Variable
+study1.extract_demo(
+            group = "case"
+            )
+
+study1.demo_df
+
+study1.case_ID
+
+### Extract CCI Variable
+
 
 ## }}}
 
 ## MISCELLANEOUS CODE{{{
+
+for chunk in  pd.read_csv(study1.ip_op_filelist()[0], 
+        compression="gzip",
+        chunksize=1000000,
+        dtype = {
+                "ENROLID": np.int64, "DX1": np.character,"DX2": np.character, "DX3": np.character, "DX4": np.character, 
+                "PROC1": np.character, "HLTHPLAN": np.character, "NTWKPROV": np.character, "PROCTYP": np.character, 
+                "PAIDNTWK": np.character, "PDX": np.character, "INDUSTRY": np.character, "CASE": np.int8, "PROVID": np.float64,
+                "QTY": np.int64, "COB": np.float64, "CAP_SVC": np.character, "PROCMOD":np.character, "PROCGRP":np.float64,
+                "PPROC":np.character
+                }
+        ):
+
+    print(chunk.shape)
+
+
+np.float16
+
+temp = pd.read_csv(study1.ip_op_filelist()[0], 
+        compression="gzip",
+        nrows = 10000,
+        dtype = {
+                "ENROLID": np.int64, "DX1": np.character,"DX2": np.character, "DX3": np.character, "DX4": np.character, 
+                "PROC1": np.character, "HLTHPLAN": np.character, "NTWKPROV": np.character, "PROCTYP": np.character, 
+                "PAIDNTWK": np.character, "PDX": np.character, "INDUSTRY": np.character, "CASE": np.float16, "PROVID": np.float64,
+                "QTY": np.int64, "COB": np.float64, "CAP_SVC": np.character, "PROCMOD":np.character, "PROCGRP":np.float64,
+                "PPROC":np.character, "WGTKEY":np.float64
+                }
+        )
+
+temp.shape
+temp.columns[83]
+
+len(temp) == 0
+
+import re
+study1.ip_op_filelist()
+
+cciobj = CCI.CCI()
+
+if re.search('(ccae.*){1}(\d){3}', study1.ip_op_filelist(printfiles=False)[1]):
+    print("HELLO")
+
+
+
 df1 = pd.DataFrame({
     "ENROLID":[1,2],
     "SVCDATE":["10/20/2013","10/25/2013"],

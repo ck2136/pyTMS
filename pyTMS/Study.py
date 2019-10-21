@@ -4,7 +4,7 @@
 # Purpose       : class Study
 # Date created  : Wed 16 Oct 2019 09:50:10 AM MDT
 # Created by    : ck
-# Last modified : Sun 20 Oct 2019 04:50:34 PM MDT
+# Last modified : Mon 21 Oct 2019 04:48:43 AM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
@@ -964,6 +964,7 @@ class Study(object):
 
         elif group == "control": 
 
+            print("MERGING IP and OP DATA")
             all_var = self.ep_ip_claims.append(self.ep_op_claims)
             all_var = self.control_ID.merge(all_var, on = "ENROLID", how = "inner")
 

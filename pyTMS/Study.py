@@ -4,7 +4,7 @@
 # Purpose       : class Study
 # Date created  : Wed 16 Oct 2019 09:50:10 AM MDT
 # Created by    : ck
-# Last modified : Tue 22 Oct 2019 11:05:25 AM MDT
+# Last modified : Tue 22 Oct 2019 01:35:11 PM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
@@ -1260,24 +1260,6 @@ class Study(object):
             ENROL_DF
             ):
 
-        """
-        Extract_CI_IDs():   Function to identify continuously enrolled participants by chunking the enrollment
-                            data for each individuals in the ENROL_DF file by 12 months. The `ENROL_DF` 
-                            can be processed from `Merge_IDX_ENR()` such that the index date serves as the
-                            first start date of the enrollment period or it may be left using the general enrollment
-                            starting period from the ccaet|mdcrt file. This method will identify the period for each 
-                            individual that has the maximum amount of continuous enrollment (CE) time captured.
-                            For example, an individual may have 1 year CE then a gap of 6 months then 2 years of CE afterwards.
-                            This individual will be considered having 2 years CE because that is the period that is the
-                            maximum CE period the person has.
-
-        Arguments:
-
-            ENROL_FIN =     Enrollment summary dataframe that contains all enrollment information based on the ccaet|mdcrt
-                            claims file. It should be a pd.DataFrame() 
-
-        """
-
         df_fin = pd.DataFrame()
         IDs = ENROL_DF.drop_duplicates(subset="ENROLID")[["ENROLID"]]
         # Make ID's into chunk so that we can process it in parallel to determine continuous enrollment
@@ -1378,18 +1360,17 @@ class Study(object):
                     yearce = 0
                     for year in range(0, int(np.floor(ind_df.shape[0]/12))):
                         covgap_sum = 0
-                        yearly_df = ind_df.loc[((12*year)+month):(((12*(year+1)) - 1)+month),:]
-                        yearly_df = yearly_df[~yearly_df.isna()].reset_index(drop=True)
+                        yearly_df = ind_df.loc[((12*year)+month):((12*(year+1)-1)+month),:]
+                        yearly_df = yearly_df[~yearly_df.isna()].reset_index()
                         # If the data frame that's created is less than 12 rows then this person
                         if yearly_df.shape[0] < 11:
                             # print("INDIVIDUAL: ", ind, " ONLY HAS ", yearly_df.shape[0], " ROWS!")
-                            # ce_ind_df.loc[j,"ENROLID"] = ind
-                            # ce_ind_df.loc[j,"CE"] = year
                             break
 
-                        # Add coverage gap based on LAST DTEND and FIRST DTSTART
-                        covgap_sum += (pd.Timedelta("365 days") - (yearly_df.loc[yearly_df.shape[0] - 1,"DTEND"] - yearly_df.loc[0,"DTSTART"] + pd.Timedelta("1 day"))).days
+                        # Include the difference between 365 days and Last DTEND and First DTSTART 
+                        covgap_sum += (pd.Timedelta("364 days") - (yearly_df.loc[yearly_df.shape[0] - 1,"DTEND"] - yearly_df.loc[0,"DTSTART"])).days
 
+                        # Cycle through each month 
                         for month_in_yr in range(0, yearly_df.shape[0]-1):
                             covgap_sum += (yearly_df.loc[month_in_yr+1, "DTSTART"] - yearly_df.loc[month_in_yr, "DTEND"] - pd.Timedelta("1 day")).days
                             if covgap_sum > 45:
@@ -1410,11 +1391,10 @@ class Study(object):
 
                         yearce += 1
 
-                    if yearly_df.shape[0] < 12:
+                    if yearly_df.shape[0] < 11:
                         ce_ind_df.loc[j,"ENROLID"] = ind
                         ce_ind_df.loc[j,"CE"] = yearce
                         break
-
                     if indinc == 1:
                         break
 
@@ -1449,41 +1429,6 @@ class Study(object):
 
     ### }}}
 
-    ### PRINT CE POP  {{{
-
-    def print_ce_pop(
-            self
-            ):
-        """
-        print_ce_pop():     Print method to print participants that are continuously enrolled for at least the duration listed
-                            in the "CE" column.
-        """
-
-        if self.CE_df.empty == True:
-            return(
-                    print("self.CE_df is empty! populate with the CE extracted pd.DataFrame()")
-                    )
-
-        temp = self.CE_df.groupby("CE", as_index=True).size().reset_index()
-
-        temp = pd.DataFrame({
-            "YEARS": temp.CE.values.tolist(),
-            "CE_POP": [
-                int(temp[temp["CE"] >= 0].agg("sum").values.tolist()[1]),
-                int(temp[temp["CE"] >= 1].agg("sum").values.tolist()[1]),
-                int(temp[temp["CE"] >= 2].agg("sum").values.tolist()[1]),
-                int(temp[temp["CE"] >= 3].agg("sum").values.tolist()[1]),
-                int(temp[temp["CE"] >= 4].agg("sum").values.tolist()[1]),
-                int(temp[temp["CE"] >= 5].agg("sum").values.tolist()[1])
-                ]
-            })
-
-
-        print(
-                print(temp)
-                )
-        ## }}}
-
     ## }}}
 
     # }}}
@@ -1507,6 +1452,9 @@ class Study(object):
 
         if group == "case":
 
+            if self.case_ID.empty:
+                return(print(".case_ID empty. ENTER THEM IN!"))
+
             arglist = list(
                     zip(
                         filelist,
@@ -1518,6 +1466,9 @@ class Study(object):
 
         elif group == "control":
 
+            if self.control_ID.empty:
+                return(print(".control_ID empty. ENTER THEM IN!"))
+
             arglist = list(
                     zip(
                         filelist,
@@ -1528,6 +1479,9 @@ class Study(object):
                     )
 
         elif group == "both":
+
+            if self.control_ID.empty | self.case_ID.empty  :
+                return(print(" .case_ID or .control_ID empty. Requires both to be entered as pd.DataFrame()"))
 
             arglist = list(
                     zip(

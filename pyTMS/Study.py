@@ -4,7 +4,7 @@
 # Purpose       : class Study
 # Date created  : Wed 16 Oct 2019 09:50:10 AM MDT
 # Created by    : ck
-# Last modified : Mon 21 Oct 2019 04:48:43 AM MDT
+# Last modified : Tue 22 Oct 2019 11:05:25 AM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
@@ -1082,6 +1082,12 @@ class Study(object):
         else: 
             return x["DTSTART_x"]
 
+    ### UTILITY FUNCTION 5- make chunks 
+    def mkchunks(self, l, n):
+        for i in range(0, len(l), n):
+            yield l[i:i+n]
+
+
     ## }}}
 
     ## MAIN FUNCTIONS {{{
@@ -1132,7 +1138,8 @@ class Study(object):
         Recursive_Extract_CI_IDs(): Function to identify continuously enrolled participants by chunking the enrollment
                                     data for each individuals in the NEWENROL_DF file by 12 months. The `NEWENROL_DF` 
                                     should be processed from `Merge_IDX_ENR()` such that the index date serves as the
-                                    first start date of the enrollment period.
+                                    first start date of the enrollment period. This method implies continuous enrollment
+                                    Starting from the index date
 
         Arguments:
 
@@ -1246,6 +1253,237 @@ class Study(object):
 
     # }}}
 
+    ### Extract Continuously Enrolled Patients using ENROL_DF {{{
+
+    def Extract_CE_IDs(
+            self,
+            ENROL_DF
+            ):
+
+        """
+        Extract_CI_IDs():   Function to identify continuously enrolled participants by chunking the enrollment
+                            data for each individuals in the ENROL_DF file by 12 months. The `ENROL_DF` 
+                            can be processed from `Merge_IDX_ENR()` such that the index date serves as the
+                            first start date of the enrollment period or it may be left using the general enrollment
+                            starting period from the ccaet|mdcrt file. This method will identify the period for each 
+                            individual that has the maximum amount of continuous enrollment (CE) time captured.
+                            For example, an individual may have 1 year CE then a gap of 6 months then 2 years of CE afterwards.
+                            This individual will be considered having 2 years CE because that is the period that is the
+                            maximum CE period the person has.
+
+        Arguments:
+
+            ENROL_FIN =     Enrollment summary dataframe that contains all enrollment information based on the ccaet|mdcrt
+                            claims file. It should be a pd.DataFrame() 
+
+        """
+
+        df_fin = pd.DataFrame()
+        IDs = ENROL_DF.drop_duplicates(subset="ENROLID")[["ENROLID"]]
+        # Make ID's into chunk so that we can process it in parallel to determine continuous enrollment
+        ID_chunk = list(
+                self.mkchunks(
+            IDs.ENROLID.values.tolist(), int((len(IDs.ENROLID.values.tolist()))/self.cores)
+            )
+                )
+
+        arglist = list(
+                zip(
+                    ID_chunk,
+                    [ENROL_DF[["ENROLID","DTSTART","DTEND"]]  for x in range(len(ID_chunk))]
+                    )
+                )
+
+        # Init parallel processes
+        pool = mp.Pool(self.cores)
+        results_obj = [pool.apply_async(self.process_extract_ce_ids, 
+            args = (
+                i, 
+                argtup[0],
+                argtup[1]
+                )
+            ) for i,argtup in enumerate(arglist)
+            ]
+        # Don't forget to close the processors
+        pool.close()
+        results_fin = [r.get()[1] for r in results_obj]
+        df_fin = df_fin.append(pd.concat(results_fin))
+
+        # Since sometimes the ID's come out as floats...  reconvert to INT
+        df_fin["ENROLID"] = [ int(x) for x in df_fin.ENROLID.values.tolist()]
+
+        # return results 
+
+        print("FINISHED COMPILING ID DF of CONTINUOUSLY ENROLLED PARTICIPANTS")
+        return(df_fin)
+
+    ### }}}
+
+    ### Extract Continuous Enrolled Participants Parallel Chunk Function {{{
+    def process_extract_ce_ids(
+            self,
+            i, 
+            IDs, 
+            ENROL_DF
+            ):
+        """
+    process_ip_op_chunk: 
+
+        Function/method to process individual chunks to extract continuously enrolled participants  
+
+    Sections in The Code
+
+    Section 1: General Setup
+    Section 2: Read Chunk of Data
+    Section 2: Include Patients using DX and CPT
+
+    Arguments: 
+
+        data = file path/name
+    """
+
+        ## SETUP THE STUDY VARIABLES
+        ## CONTINUOUS ENROLLMENT MONTHS
+        ce_ind_df = pd.DataFrame()
+        # CONVERT DATES
+        ENROL_DF["DTSTART"] = pd.to_datetime(ENROL_DF["DTSTART"])
+        ENROL_DF["DTEND"] = pd.to_datetime(ENROL_DF["DTEND"])
+
+        # import pdb
+        # pdb.set_trace()
+        j = 0
+        for ind in IDs:
+            # print("ASSESSING INDIVIDUAL: ", ind, " FOR CONTINUOUS ENROLLMENT.")
+            # set indicator for individual
+            indinc = 0
+            # Load whole individuals data
+            ind_df = ENROL_DF[ENROL_DF["ENROLID"] == ind].reset_index(drop=True)
+            ind_df = ind_df[["ENROLID","DTSTART","DTEND"]]
+            covgap = 0
+            # If inidvidual doesn't have more than 11 rows then skip
+            if ind_df.shape[0] < 11:
+                # print("INDIVIDUAL: ", ind, " HASS LESS THAN 12 TOTAL RECORDS... NOT CONTINUOUSLY ENROLLED.")
+                ce_ind_df.loc[j,"ENROLID"] = ind
+                ce_ind_df.loc[j,"CE"] = 0
+                pass
+            else:
+                # For each of the months being used to check continuous enrollment
+                # for month in range(0, min(study_period - months + 2,ind_df.shape[0]-1)):
+                for month in range(0, ind_df.shape[0]-12+2):
+                    # print("MONTH : ", month, " FOR INDIVIDUAL ", ind)
+                    # create a yearly data so that 45 days allowable gap per year can be assessed
+
+                    covgap_sum = 0
+                    yearly_df = pd.DataFrame()
+                    yearce = 0
+                    for year in range(0, int(np.floor(ind_df.shape[0]/12))):
+                        covgap_sum = 0
+                        yearly_df = ind_df.loc[((12*year)+month):(((12*(year+1)) - 1)+month),:]
+                        yearly_df = yearly_df[~yearly_df.isna()].reset_index(drop=True)
+                        # If the data frame that's created is less than 12 rows then this person
+                        if yearly_df.shape[0] < 11:
+                            # print("INDIVIDUAL: ", ind, " ONLY HAS ", yearly_df.shape[0], " ROWS!")
+                            # ce_ind_df.loc[j,"ENROLID"] = ind
+                            # ce_ind_df.loc[j,"CE"] = year
+                            break
+
+                        # Add coverage gap based on LAST DTEND and FIRST DTSTART
+                        covgap_sum += (pd.Timedelta("365 days") - (yearly_df.loc[yearly_df.shape[0] - 1,"DTEND"] - yearly_df.loc[0,"DTSTART"] + pd.Timedelta("1 day"))).days
+
+                        for month_in_yr in range(0, yearly_df.shape[0]-1):
+                            covgap_sum += (yearly_df.loc[month_in_yr+1, "DTSTART"] - yearly_df.loc[month_in_yr, "DTEND"] - pd.Timedelta("1 day")).days
+                            if covgap_sum > 45:
+                                break
+
+                        if covgap_sum > 45:
+                            ce_ind_df.loc[j,"ENROLID"] = ind
+                            ce_ind_df.loc[j,"CE"] = year
+                            break
+
+                        # if (year == int(np.floor(months/12))) & (covgap_sum < 45*int(np.floor(months/12))):
+                        if (year == int(np.floor(ind_df.shape[0]/12)) - 1) & (covgap_sum <= 45):
+                            # print("CONTINUOUSLY ENROLLED INDIVIDUAL : ", ind)
+                            ce_ind_df.loc[j,"ENROLID"] = ind
+                            ce_ind_df.loc[j,"CE"] = year + 1
+                            indinc = 1
+                            break
+
+                        yearce += 1
+
+                    if yearly_df.shape[0] < 12:
+                        ce_ind_df.loc[j,"ENROLID"] = ind
+                        ce_ind_df.loc[j,"CE"] = yearce
+                        break
+
+                    if indinc == 1:
+                        break
+
+                # if indinc == 1:
+                    # break
+
+            # Change individuals
+            j += 1
+            # print("ASSESSING INDIVIDUAL : ", ind, " COMPLETE.")
+            if j == int(0.1*len(IDs)):
+                print("10% COMPLETE ")
+            if j == int(0.2*len(IDs)):
+                print("20% COMPLETE ")
+            if j == int(0.3*len(IDs)):
+                print("30% COMPLETE ")
+            if j == int(0.4*len(IDs)):
+                print("40% COMPLETE ")
+            if j == int(0.5*len(IDs)):
+                print("50% COMPLETE ")
+            if j == int(0.6*len(IDs)):
+                print("60% COMPLETE ")
+            if j == int(0.7*len(IDs)):
+                print("70% COMPLETE ")
+            if j == int(0.8*len(IDs)):
+                print("80% COMPLETE ")
+            if j == int(0.9*len(IDs)):
+                print("90% COMPLETE ")
+            if j == int(1*len(IDs)):
+                print("100% COMPLETE ")
+
+        return(i, ce_ind_df)
+
+    ### }}}
+
+    ### PRINT CE POP  {{{
+
+    def print_ce_pop(
+            self
+            ):
+        """
+        print_ce_pop():     Print method to print participants that are continuously enrolled for at least the duration listed
+                            in the "CE" column.
+        """
+
+        if self.CE_df.empty == True:
+            return(
+                    print("self.CE_df is empty! populate with the CE extracted pd.DataFrame()")
+                    )
+
+        temp = self.CE_df.groupby("CE", as_index=True).size().reset_index()
+
+        temp = pd.DataFrame({
+            "YEARS": temp.CE.values.tolist(),
+            "CE_POP": [
+                int(temp[temp["CE"] >= 0].agg("sum").values.tolist()[1]),
+                int(temp[temp["CE"] >= 1].agg("sum").values.tolist()[1]),
+                int(temp[temp["CE"] >= 2].agg("sum").values.tolist()[1]),
+                int(temp[temp["CE"] >= 3].agg("sum").values.tolist()[1]),
+                int(temp[temp["CE"] >= 4].agg("sum").values.tolist()[1]),
+                int(temp[temp["CE"] >= 5].agg("sum").values.tolist()[1])
+                ]
+            })
+
+
+        print(
+                print(temp)
+                )
+        ## }}}
+
     ## }}}
 
     # }}}
@@ -1326,8 +1564,10 @@ class Study(object):
         # return results 
 
         print("FINISHED COMPILING ", group, " claims!")
+        print("Sorting Duplicate Enrollment Claims... Taking the earliest Year!")
         print("Results are demographic claims data of ", group, " group ! It's stored in .demo_df")
-        self.demo_df = df_fin
+
+        self.demo_df = df_fin.sort_values(["ENROLID","YEAR"]).groupby("ENROLID").head(1)
 
 
     # }}}

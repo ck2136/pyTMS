@@ -4,7 +4,7 @@
 # Purpose       : class Study
 # Date created  : Wed 16 Oct 2019 09:50:10 AM MDT
 # Created by    : ck
-# Last modified : Tue 22 Oct 2019 01:35:11 PM MDT
+# Last modified : Tue 22 Oct 2019 10:00:31 PM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
@@ -68,6 +68,9 @@ class Study(object):
          "G47411","G47419","G4742","G47420","G47421",
          "G47429"
          ]
+        self.ICD_cataplexy = [
+                "G47411","G47421","34701","34711",
+                ]
         self.CPT = ["95782","95805","95808","95810"]
         self.ICD9_CTRL = []
         self.ICD10_CTRL = []
@@ -103,6 +106,8 @@ class Study(object):
                     "4": "4-West",
                     "5": "5-Unknown"
                 }
+        self.DX_LIST_OP = ["DX1","DX2","DX3","DX4"]
+        self.DX_LIST_IP = self.DX_LIST_OP + ["PDX"]
 
     # }}}
 
@@ -1429,6 +1434,22 @@ class Study(object):
 
     ### }}}
 
+    ### PRINT Continuously Enrolled Population {{{
+    def print_ce_pop(self):
+
+        if self.CE_df.emtpy:
+            return(print("EMPTY self.CE_df!"))
+
+        N = []
+        for x in self.CE_df.groupby("CE").size().reset_index().rename(columns={0:"N"})['CE']:
+            N.append(self.CE_df[self.CE_df["CE"] >= x].shape[0])
+
+        sumdf = pd.DataFrame({
+            "YEAR": self.CE_df.groupby("CE").size().reset_index().rename(columns={0:"N"})['CE'],
+            "N": N
+            })
+    ### }}}
+
     ## }}}
 
     # }}}
@@ -1523,6 +1544,139 @@ class Study(object):
 
         self.demo_df = df_fin.sort_values(["ENROLID","YEAR"]).groupby("ENROLID").head(1)
 
+    # }}}
+
+    # STEP 8 : Makesure All DXVER columns are correctly classifying ICD9 and ICD10 {{{
+    def calculate_cci(
+            self,
+            ip_claims,
+            op_claims
+            ):
+        from pyTMS import CCI
+        cciobj = CCI.CCI()
+
+        # 1. FIRST MERGE ALL THE INPATIENT AND OUTPATIENT DX into 1 DF and IDENTIFY UNIQUE DX BY ENROLID
+        DX_DF = pd.DataFrame()
+        ## IP
+        for x in range(len(self.DX_LIST_IP)):
+            DX_DF = DX_DF.append(ip_claims.loc[(ip_claims[self.DX_LIST_IP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_IP[x]]].rename(columns={self.DX_LIST_IP[x]: "DX"}).drop_duplicates())
+
+        ## OP
+        for x in range(len(self.DX_LIST_OP)):
+            DX_DF = DX_DF.append(op_claims.loc[(op_claims[self.DX_LIST_OP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_OP[x]]].rename(columns={self.DX_LIST_OP[x]: "DX"}).drop_duplicates())
+
+        DX_DF["DXVER"] = DX_DF.apply(lambda x: self.def_dxver(x), axis=1)
+        DX_DF = DX_DF.drop_duplicates()
+
+        # 2. CREATE BINARY CCI INDICATOR VARIABLES FOR EACH INDIVIDUAL
+        for x in range(len(cciobj.CCI_NAME)):
+            DX_DF[cciobj.CCI_NAME[x]]=(((DX_DF.DXVER==0) & ((DX_DF.DX.str[:3].isin(cciobj.CCI_LIST_10[x][0])) | (DX_DF.DX.isin(cciobj.CCI_LIST_10[x][1])))) | ((DX_DF.DXVER == 9) & ((DX_DF.DX.str[:3].isin(cciobj.CCI_LIST_9[x][0])) | (DX_DF.DX.isin(cciobj.CCI_LIST_9[x][1])))))
+
+        # groupby ENROLID and CCI Categories
+        DX_DF_CCI = DX_DF[["ENROLID"] + list(cciobj.CCI_NAME)].groupby(["ENROLID"], sort=False)[cciobj.CCI_NAME].max()
+        # Add column equal to sum number of CCI categories by ENROLID
+        DX_DF_CCI["CCI_SUM"] = DX_DF_CCI[list(cciobj.CCI_NAME)].sum(axis=1)
+        # Calculate CCI score by ENROLID
+        DX_DF_CCI["CCI_SCORE"] = DX_DF_CCI[cciobj.CCI_CLASS1].sum(axis=1) + (DX_DF_CCI[cciobj.CCI_CLASS2].sum(axis=1)*2) + (DX_DF_CCI[cciobj.CCI_CLASS3].sum(axis=1)*3) + (DX_DF_CCI[cciobj.CCI_CLASS6].sum(axis=1)*6) 
+        # Categorical variable for CCI score
+        DX_DF_CCI["CCI_SCORE_GROUP"] = DX_DF_CCI.apply(lambda row:  self.cci_group_mk(row), axis=1)
+
+
+        return(
+                DX_DF_CCI
+                )
+
+
+    # UTILITY FUNCTION TO IDENTIFY IF DXVER IS MISSING IF SO THEN CHECK DX COLUMN AND IF IT STARTS WITH DIGIT THEN IT"S A ICD 
+    def def_dxver(
+            self, 
+            x
+            ):
+        if pd.isna(x["DXVER"]) :
+            if re.search("^\d.*", x["DX"]):
+                return 9
+            else:
+                return 0
+        else:
+            return x["DXVER"]
+
+    # UTILITY FUNCTION TO IDENTIFY IF DXVER IS MISSING IF SO THEN CHECK DX COLUMN AND IF IT STARTS WITH DIGIT THEN IT"S A ICD 
+    def cci_group_mk(
+            self, 
+            x
+            ):
+        if (x.CCI_SCORE == 1) | (x.CCI_SCORE == 2) :
+            return "1-2"
+        elif (x.CCI_SCORE == 3) | (x.CCI_SCORE == 4) :
+            return "3-4"
+        elif x.CCI_SCORE >= 5:
+            return "5+"
+        else:
+            return str(x.CCI_SCORE)
+
+    # }}}
+
+    # STEP 9 : Identify Type of Narcolepsy {{{
+
+    def identify_narcolepsy(
+            self,
+            ip_claims,
+            op_claims
+            ):
+        """
+        identify_narcolepsy()   : Custom function to identify the type of narcolepsy individuals have in the Narcolepsy group
+
+        Arguments:
+            
+            ip_claims           : Inpatient claims extracted from the ccaesNNN|mdcrsNNN
+            op_claims           : Outpatient claims extracted from the ccaeoNNN|mdcroNNN
+        """
+        from pyTMS import CCI
+        cciobj = CCI.CCI()
+
+        # 1. FIRST MERGE ALL THE INPATIENT AND OUTPATIENT DX into 1 DF and IDENTIFY UNIQUE DX BY ENROLID
+        DX_DF = pd.DataFrame()
+        ## IP
+        for x in range(len(self.DX_LIST_IP)):
+            DX_DF = DX_DF.append(ip_claims.loc[(ip_claims[self.DX_LIST_IP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_IP[x]]].rename(columns={self.DX_LIST_IP[x]: "DX"}).drop_duplicates())
+
+        ## OP
+        for x in range(len(self.DX_LIST_OP)):
+            DX_DF = DX_DF.append(op_claims.loc[(op_claims[self.DX_LIST_OP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_OP[x]]].rename(columns={self.DX_LIST_OP[x]: "DX"}).drop_duplicates())
+
+        DX_DF["DXVER"] = DX_DF.apply(lambda x: self.def_dxver(x), axis=1)
+        DX_DF = DX_DF.drop_duplicates()
+
+        # 2. CREATE BINARY CATPLEXY INDICATOR VARIABLE FOR EACH INDIVIDUAL
+        DX_DF["CATAPLEXY"]= DX_DF.DX.isin(self.ICD_cataplexy) 
+        IDs = DX_DF[["ENROLID"]].drop_duplicates()
+        CATAPLEXYGRP = DX_DF[DX_DF["CATAPLEXY"] == True].drop_duplicates()[["ENROLID","CATAPLEXY"]].drop_duplicates()
+        NOCATAPLEXYGRP = pd.DataFrame({
+            "ENROLID" : list(set(IDs.ENROLID.values.tolist()) - set(CATAPLEXYGRP.ENROLID.values.tolist())),
+            "CATAPLEXY" : [False for x in range(len(list(set(IDs.ENROLID.values.tolist()) - set(CATAPLEXYGRP.ENROLID.values.tolist()))))]
+            })
+
+        CATAPLEXYGRP = CATAPLEXYGRP.append(NOCATAPLEXYGRP)
+
+        return(
+                CATAPLEXYGRP
+                )
+
+
+    # }}}
+
+    # STEP 10 : Create baseline demographic table {{{
+
+    def mk_bl_df(
+            self,
+            demo_df,
+            DX_DF_CCI,
+            NARCOLEPSY_TYPE
+            ):
+
+        return(
+                demo_df.merge(DX_DF_CCI, on = "ENROLID", how="inner").merge(NARCOLEPSY_TYPE, on="ENROLID", how="inner")
+                )
 
     # }}}
 

@@ -4,7 +4,7 @@
 # Purpose       : class Study
 # Date created  : Wed 16 Oct 2019 09:50:10 AM MDT
 # Created by    : ck
-# Last modified : Tue 22 Oct 2019 10:00:31 PM MDT
+# Last modified : Wed 23 Oct 2019 05:14:22 PM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
@@ -72,6 +72,9 @@ class Study(object):
                 "G47411","G47421","34701","34711",
                 ]
         self.CPT = ["95782","95805","95808","95810"]
+        self.ICD_CMB = []
+        self.CMB_LIST_9 = [[],[]]
+        self.CMB_LIST_10 = [[],[]]
         self.ICD9_CTRL = []
         self.ICD10_CTRL = []
         self.CPT_CTRL = []
@@ -1546,7 +1549,7 @@ class Study(object):
 
     # }}}
 
-    # STEP 8 : Makesure All DXVER columns are correctly classifying ICD9 and ICD10 {{{
+    # STEP 8 : CALCULATE CCI USING IP/OP CLAIMS {{{
     def calculate_cci(
             self,
             ip_claims,
@@ -1677,6 +1680,187 @@ class Study(object):
         return(
                 demo_df.merge(DX_DF_CCI, on = "ENROLID", how="inner").merge(NARCOLEPSY_TYPE, on="ENROLID", how="inner")
                 )
+
+    # }}}
+
+    # STEP 11 : FLAG COMORBIDITIES (USUALLY OUTCOME OF INTEREST) {{{
+
+    ### COMORBIDITIES OVERALL FNCTION {{{
+    def flag_cmbdx(
+            self,
+            ip_claims,
+            op_claims
+            ):
+        """
+        flag_cmbdx()    :   Function/method to flag participants (who are of the evaluable population) that have a DX of the 
+                            comorbidities listed in the .cmd_list attribute of the Study object. 
+
+        Arguments:
+
+            ip_claims           : Inpatient claims extracted from the ccaesNNN|mdcrsNNN
+            op_claims           : Outpatient claims extracted from the ccaeoNNN|mdcroNNN
+        """
+
+        # 1. FIRST MERGE ALL THE INPATIENT AND OUTPATIENT DX into 1 DF and IDENTIFY UNIQUE DX BY ENROLID
+        DX_DF = pd.DataFrame()
+        print("MERGING IP and OP Claims Together")
+        ## IP
+        for x in range(len(self.DX_LIST_IP)):
+            DX_DF = DX_DF.append(ip_claims.loc[(ip_claims[self.DX_LIST_IP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_IP[x]]].rename(columns={self.DX_LIST_IP[x]: "DX"}).drop_duplicates())
+
+        ## OP
+        for x in range(len(self.DX_LIST_OP)):
+            DX_DF = DX_DF.append(op_claims.loc[(op_claims[self.DX_LIST_OP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_OP[x]]].rename(columns={self.DX_LIST_OP[x]: "DX"}).drop_duplicates())
+
+        print("Dropping Duplicates")
+        DX_DF["DXVER"] = DX_DF.apply(lambda x: self.def_dxver(x), axis=1)
+        DX_DF = DX_DF.drop_duplicates()
+
+        # 2. CREATE BINARY CATPLEXY INDICATOR VARIABLE FOR EACH INDIVIDUAL
+        print("Creating Flag for COMORBIDITIES")
+        DX_DF["COMORBDX"] = (((DX_DF.DXVER==0) & ((DX_DF.DX.str[:3].isin(self.CMB_LIST_10[0])) | (DX_DF.DX.isin(self.CMB_LIST_10[1])))) | ((DX_DF.DXVER == 9) & ((DX_DF.DX.str[:3].isin(self.CMB_LIST_9[0])) | (DX_DF.DX.isin(self.CMB_LIST_9[1])))))
+        IDs = DX_DF[["ENROLID"]].drop_duplicates()
+
+        COMORBGRP = DX_DF[DX_DF["COMORBDX"] == True].drop_duplicates()[["ENROLID","COMORBDX"]].drop_duplicates()
+        NOCOMORBGRP = pd.DataFrame({
+            "ENROLID" : list(set(IDs.ENROLID.values.tolist()) - set(COMORBGRP.ENROLID.values.tolist())),
+            "COMORBDX" : [False for x in range(len(list(set(IDs.ENROLID.values.tolist()) - set(COMORBGRP.ENROLID.values.tolist()))))]
+            })
+
+        COMORBGRP = COMORBGRP.append(NOCOMORBGRP)
+
+        return(
+                COMORBGRP
+                )
+    ### }}}
+
+    ### UTILITY FUNCTINOS {{{
+    def create_cmb_list(
+            self,
+            listofcmbdx
+            ):
+
+        for x in listofcmbdx:
+            if re.search("^\d.*",x):
+                if len(x) == 3:
+                    self.CMB_LIST_9[0].append(x)
+                else:
+                    self.CMB_LIST_9[1].append(x)
+            else:
+                if len(x) == 3:
+                    self.CMB_LIST_10[0].append(x)
+                else:
+                    self.CMB_LIST_10[1].append(x)
+
+    ### }}}
+
+    ### Create Dummy DataFrame based on List of Comorbidities {{{
+    def classify_cmbdx(
+            self,
+            # Load the cmb_dx file
+            cmb_dx,
+            ip_claims,
+            op_claims
+            ):
+
+        """
+        classify_cmbdx()        :   Method to create a pd.DataFrame() where individual rows represent an individuals'
+                                    Diagnosis of the the comorbidities based on 
+
+        Arguments   :
+
+            cmb_dx              :   pd.DataFrame() with "Code" column indicating ICD9 or ICD10 in string and "SDESC"
+                                    column indicating the diagnosis group
+            ip_claims           :   Inpatient claims extracted from the ccaesNNN|mdcrsNNN
+            op_claims           :   Outpatient claims extracted from the ccaeoNNN|mdcroNNN
+
+        Return      :
+
+            [DX_DF_CMB, CMB_DIC]
+            DX_DF_CMB           :   A pd.DataFrame() of one patient one row where each column indicates a DX of the 
+                                    selected DX from cmb_dx
+            CMB_DIC             :   A pd.DataFrame() of dictionary indicating the correspondence of "DX#" to Name of
+                                    Diagnosis group
+                    
+        """
+
+        print("CLEANING DX CODES")
+        # A. Make a compiled Comorbidity Diagnosis List 
+        ## 1. Identify unique diagnoses groups
+        CMB_DX_DF = cmb_dx[~cmb_dx["SDESC"].isnull()][['SDESC']].drop_duplicates().reset_index(drop=True)
+
+        ## 2. Clean the DX so that they don't have periods
+        import re
+        cmb_dx["Code"] = [re.sub("\.","", str(x)) for x in cmb_dx.loc[:,"Code"].values.tolist()]
+
+        ## 3. Create the list of CMB where the number of list is the number of cmb and within each cmb list there is 3 letter and 4 letter
+        DX_LIST_CMB = [[[[],[]],[[],[]]] for x in range(len(CMB_DX_DF.SDESC))]
+
+        # for each of the major diagnoses groups
+        for x in range(len(CMB_DX_DF.SDESC)):
+            # for each diagnosis in the group
+            for dx in cmb_dx[cmb_dx["SDESC"] == CMB_DX_DF.SDESC[x]].Code:
+                # IF dx starts with digit then ICD9
+                if re.search("^\d.*",dx):
+                    if len(dx) == 3:
+                        # 1st index is diagnosis group
+                        # 2nd index is for ICD9
+                        # 3rd index is for 3 letter vs N letter
+                        DX_LIST_CMB[x][0][0].append(dx)
+                    else:
+                        DX_LIST_CMB[x][0][1].append(dx)
+
+                # IF dx starts with letter then ICD10
+                else:
+                    if len(dx) == 3:
+                        DX_LIST_CMB[x][1][0].append(dx)
+                    else:
+                        DX_LIST_CMB[x][1][1].append(dx)
+
+
+        # B. MERGE ALL THE INPATIENT AND OUTPATIENT DX into 1 DF and IDENTIFY UNIQUE DX BY ENROLID
+        DX_DF = pd.DataFrame()
+        print("MERGING IP and OP Claims Together")
+
+        ## IP
+        for x in range(len(self.DX_LIST_IP)):
+            DX_DF = DX_DF.append(ip_claims.loc[(ip_claims[self.DX_LIST_IP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_IP[x]]].rename(columns={self.DX_LIST_IP[x]: "DX"}).drop_duplicates())
+
+        ## OP
+        for x in range(len(self.DX_LIST_OP)):
+            DX_DF = DX_DF.append(op_claims.loc[(op_claims[self.DX_LIST_OP[x]].notnull()), ["ENROLID","DXVER",self.DX_LIST_OP[x]]].rename(columns={self.DX_LIST_OP[x]: "DX"}).drop_duplicates())
+
+        print("Replacing Missing DXVER Values")
+        DX_DF["DXVER"] = DX_DF.apply(lambda x: self.def_dxver(x), axis=1)
+        DX_DF = DX_DF.drop_duplicates()
+
+        # C. CREATE BINARY COMORBIDITY INDICATOR VARIABLES FOR EACH INDIVIDUAL
+
+        # for each of the major diagnoses groups
+        print("Constructing Comorbidity DataFrame")
+        for x in range(len(CMB_DX_DF.SDESC)):
+            DX_DF["DX"+str(x)]=(((DX_DF.DXVER==0) & ((DX_DF.DX.str[:3].isin(DX_LIST_CMB[x][1][0])) | (DX_DF.DX.isin(DX_LIST_CMB[x][1][1])))) | ((DX_DF.DXVER == 9) & ((DX_DF.DX.str[:3].isin(DX_LIST_CMB[x][0][0])) | (DX_DF.DX.isin(DX_LIST_CMB[x][0][1])))))
+
+        CMB_NAME = ["DX"+str(x) for x in range(len(CMB_DX_DF.SDESC))]
+        CMB_DIC = pd.DataFrame({
+            "CMB_DX": CMB_DX_DF["SDESC"],
+            "COLNAME": CMB_NAME 
+            })
+
+        # groupby ENROLID and CCI Categories
+        DX_DF_CMB = DX_DF[["ENROLID"] + CMB_NAME].groupby(["ENROLID"], sort=False)[CMB_NAME].max()
+        # Add column equal to sum number of CCI categories by ENROLID
+        DX_DF_CMB["CMB_SUM"] = DX_DF_CMB[CMB_NAME].sum(axis=1)
+        # Indicator of OVERALL CMBDX 
+        DX_DF_CMB["ANYCMB"] = DX_DF_CMB.apply(lambda x: 1 if x.CMB_SUM > 0 else 0, axis=1)
+
+        return(
+                [
+                    DX_DF_CMB, CMB_DIC
+                    ]
+                )
+
+    ### }}}
 
     # }}}
 

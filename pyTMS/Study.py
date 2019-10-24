@@ -4,7 +4,7 @@
 # Purpose       : class Study
 # Date created  : Wed 16 Oct 2019 09:50:10 AM MDT
 # Created by    : ck
-# Last modified : Wed 23 Oct 2019 05:14:22 PM MDT
+# Last modified : Thu 24 Oct 2019 07:16:17 AM MDT
 # Modified by   : ck
 # - - - - - - - - - - - - - - - - - - - - - # 
 
@@ -470,8 +470,7 @@ class Study(object):
             cols = ["ENROLID"],
             store = True,
             idonly = True,
-            group = "control",
-            N = 100000
+            group = "control"
             ):
 
         # reset the regexpattern to take Annual Enrollment Details Table (t at the end)
@@ -526,11 +525,11 @@ class Study(object):
                     self.control_ID = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]].head(N)
                 else:
                     return(
-                            df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]].head(N)
+                            df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]]
                             )
             else:
 
-                self.control_ID  = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]].head(N)
+                self.control_ID  = df_fin.groupby("ENROLID", as_index=False).size().reset_index()[["ENROLID"]]
                 if store:
                     self.control_claims = self.control_ID.merge(df_fin, on="ENROLID",how="inner")
                 else:
@@ -1248,10 +1247,19 @@ class Study(object):
     ### }}}
 
     ### Extract evaluation population based on years {{{
-    def extract_eval_pop(
+    def extract_pop_CE(
             self,
             years=1
             ):
+        """
+        extract_pop_CE() :      Method to extract pd.DataFrame() of participants in self.CE_df based on the amount of time
+                                continuously enrolled recorded in the "CE" column
+
+        Arguments   :
+            years   :           Number of years continuously enrolled according to the "CE" column in self.CE_df
+
+        Output      :           pd.DataFrame() with "ENROLID" 
+        """
 
         if self.CE_df.empty == True:
             print("CE_df is empty! Add the continuous enrollment data")
@@ -1451,6 +1459,59 @@ class Study(object):
             "YEAR": self.CE_df.groupby("CE").size().reset_index().rename(columns={0:"N"})['CE'],
             "N": N
             })
+    ### }}}
+
+    ### Extract Summary Table from General Population by Chunks {{{
+
+    def Extract_CE_IDs_genpop(
+            self,
+            Nchunks = 5
+            ):
+        """
+        Extract_CE_IDs_genpop() :   Method to extract enrollment information for general population IDs.
+                                    This method was created because computer memories would crash if we load too much data
+                                    on the memory. The goal is to chunk the process by loading a small portion of the 
+                                    IP/OP claims onto memory each time and extract a small portion of enrollment information
+                                    at a time.
+        """
+
+        if self.control_ID.empty:
+            return(print("self.control_ID is empty!"))
+
+        # Create a final dataframe
+        df_fin = pd.DataFrame()
+        self.control_ID = self.control_ID.drop_duplicates(subset="ENROLID")[["ENROLID"]]
+        # Make ID's into chunk so that we can process it in small chunks (by Nchunks)
+        ID_chunk = list(
+                self.mkchunks(
+            self.control_ID.ENROLID.values.tolist(), int((len(self.control_ID.ENROLID.values.tolist()))/Nchunks)
+            )
+                )
+
+        # Process the chunks through for-looping
+        cn = 0
+
+        for chunk in ID_chunk:
+            print("Chunk ", cn, " of ", len(ID_chunk))
+
+            # Get subset of the claims data
+            ## Initially store all claims 
+
+            print("Extracting Enrollment Information ")
+            ENROL_DF = self.extract_enroll_claims(
+                    process = self.process_enroll_chunk_all,
+                    store = False,
+                    cols = self.enrl_cols,
+                    idonly=False,
+                    group="control"
+                    )
+
+            print("Appending  ", cn, " enrollment claims onto final enrollment dataset")
+            df_fin = df_fin.append(ENROL_DF)
+
+        print("FINISHED COMPILING ENROLLMENT DF")
+        return(df_fin)
+
     ### }}}
 
     ## }}}
